@@ -5,3 +5,8 @@ Tests/ProtocolCheck/.build/
 Tests/ProtocolCheck/Sources/ProtocolCheck/PhilipsClient.swift
 Tests/ProtocolCheck/Sources/ProtocolCheck/Keys.swift
 Tests/ProtocolCheck/Sources/ProtocolCheck/Discovery.swift
+Tests/ProtocolCheck/Sources/ProtocolCheck/ATVProtocol.swift
+Tests/atv/*_pb2.py
+Tests/atv/__pycache__/
+Tests/ATVCheck/.build/
+Tests/ATVCheck/Sources/ATVCheck/ATV*.swift

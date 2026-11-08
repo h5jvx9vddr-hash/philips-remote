@@ -13,8 +13,16 @@ struct TVEndpoint: Codable, Equatable, Hashable {
     var host: String
     /// HTTPS auf 1926 (Android-TVs ab 2016) statt HTTP auf 1925.
     var secure: Bool
-    /// JointSPACE-Version: 1 (2011–2015), 5 oder 6 (Android/Saphi).
+    /// JointSPACE-Version: 1 (2011–2015), 5 oder 6 (Android/Saphi); 0 bei Android-TV-Geräten.
     var api: Int
+    /// nil = Philips JointSPACE; .androidTV = Google-TV-Fernbedienungsprotokoll (Ports 6466/6467).
+    var kind: TVKind? = nil
+
+    var isAndroidTV: Bool { kind == .androidTV }
+}
+
+enum TVKind: String, Codable, Hashable {
+    case androidTV
 }
 
 /// Infos aus `/<api>/system`.
@@ -55,6 +63,8 @@ struct PairingSession: Equatable {
 struct PhilipsPorts: Sendable {
     var http = 1925
     var https = 1926
+    var atvRemote = 6466
+    var atvPairing = 6467
     static let standard = PhilipsPorts()
 }
 

@@ -1,4 +1,5 @@
 import Foundation
+import _CryptoExtras
 #if canImport(FoundationNetworking)
 import FoundationNetworking
 #endif
@@ -116,6 +117,56 @@ do {
 } catch PhilipsError.unreachable(let why) {
     check(Date().timeIntervalSince(start) < 6, "nicht erreichbar → \(why)")
 }
+
+// Android-TV-Protokoll (Vektoren aus Tests/atv/vectors.py gen)
+let vec = try JSONSerialization.jsonObject(with: Data(contentsOf: URL(fileURLWithPath: CommandLine.arguments[3]))) as! [String: Any]
+func vhex(_ k: String) -> Data { ATV.hexBytes(vec[k] as! String)! }
+check(ATV.parsePairing(vhex("pairing_request_ack")) == .requestAck, "polo: pairing_request_ack")
+check(ATV.parsePairing(vhex("options")) == .options, "polo: options")
+check(ATV.parsePairing(vhex("configuration_ack")) == .configurationAck, "polo: configuration_ack (leer)")
+check(ATV.parsePairing(vhex("secret_ack")) == .secretAck, "polo: secret_ack")
+check(ATV.parsePairing(vhex("bad_secret")) == .error(402), "polo: Status 402")
+check(ATV.parseRemote(vhex("remote_configure")) == .configure(features: 622, model: "MagentaTV One", vendor: "Telekom"), "remote: configure")
+check(ATV.parseRemote(vhex("remote_set_active")) == .setActive, "remote: set_active (leer)")
+check(ATV.parseRemote(vhex("remote_ping")) == .ping(300), "remote: ping 300")
+check(ATV.parseRemote(vhex("remote_start")) == .started(true), "remote: start")
+check(ATV.parseRemote(vhex("remote_volume")) == .volume(level: 12, max: 100, muted: true), "remote: Lautstärke 12/100 stumm")
+
+let sv = vec["secret"] as! [String: String]
+let cKey = RSAPublic(pkcs1: ATV.hexBytes(sv["client"]!)!)!
+let sKey = RSAPublic(pkcs1: ATV.hexBytes(sv["server"]!)!)!
+check(cKey.exponent == Data([1, 0, 1]) && cKey.modulus.count == 256, "PKCS#1 lesen (256-Byte-Modulus, e=65537)")
+let secret = ATV.secret(client: cKey, server: sKey, code: sv["code"]!.lowercased())
+check(secret == ATV.hexBytes(sv["expected"]!), "Kopplungs-Prüfsumme wie Referenz (Code \(sv["code"]!))")
+check(ATV.secret(client: cKey, server: sKey, code: sv["wrong_code"]!) == nil, "Tippfehler im Code erkannt")
+
+var deframer = Proto.Deframer()
+let stream = Proto.frame(ATV.keyPress(24)) + Proto.frame(Data(repeating: 7, count: 300)) + Proto.frame(ATV.pingReply(5))
+var parts: [Data] = []
+for i in stride(from: 0, to: stream.count, by: 3) { parts += deframer.push(stream.subdata(in: i ..< min(i + 3, stream.count))) }
+check(parts.count == 3 && parts[1].count == 300 && ATV.parseRemote(parts[2]) == .other, "Längenpräfix über Paketgrenzen")
+
+let out: [String: String] = [
+    "pairing_request": ATV.pairingRequest(clientName: "Philips Remote (CI)"),
+    "options": ATV.pairingOptions(),
+    "configuration": ATV.pairingConfiguration(),
+    "secret": ATV.pairingSecret(secret ?? Data()),
+    "secret_value": secret ?? Data(),
+    "configure_reply": ATV.configureReply(tvFeatures: 622),
+    "set_active_reply": ATV.setActiveReply(tvFeatures: 622),
+    "ping_reply": ATV.pingReply(300),
+    "key": ATV.keyPress(24),
+    "app_link": ATV.appLink("https://www.netflix.com/title"),
+].mapValues { $0.map { String(format: "%02x", $0) }.joined() }
+try JSONSerialization.data(withJSONObject: out).write(to: URL(fileURLWithPath: CommandLine.arguments[4]))
+
+// Selbstsigniertes Zertifikat (Prüfung mit openssl im Workflow)
+let rsaKey = try _RSA.Signing.PrivateKey(keySize: .bits2048)
+let certDER = try DER.selfSignedCertificate(publicKeyPKCS1: rsaKey.publicKey.pkcs1DERRepresentation, commonName: ATV.commonName) {
+    try rsaKey.signature(for: $0, padding: .insecurePKCS1v1_5).rawRepresentation
+}
+try DER.pem(certDER).write(toFile: CommandLine.arguments[5], atomically: true, encoding: .utf8)
+check(RSAPublic(pkcs1: rsaKey.publicKey.pkcs1DERRepresentation)?.exponent == Data([1, 0, 1]), "eigenen Schlüssel lesen")
 
 print(failures == 0 ? "\nAlles grün." : "\n\(failures) Fehler.")
 exit(failures == 0 ? 0 : 1)

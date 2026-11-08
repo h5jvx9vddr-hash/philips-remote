@@ -43,9 +43,20 @@ struct PressTVKeyIntent: AppIntent {
     func perform() async throws -> some IntentResult & ProvidesDialog {
         guard var tv = SavedTV.load() else { throw PhilipsError.notPaired }
         // Anderes WLAN/Hotspot → TV unter neuer IP suchen und merken.
-        if (try? await tv.client.info()) == nil, let moved = await tv.locate() {
+        let reachable: Bool
+        if tv.endpoint.isAndroidTV {
+            reachable = await !Discovery.openHosts([tv.endpoint.host], ports: [ATV.remotePort]).isEmpty
+        } else {
+            reachable = (try? await tv.client.info()) != nil
+        }
+        if !reachable, let moved = await tv.locate() {
             tv = moved
             tv.save()
+        }
+        if tv.endpoint.isAndroidTV {
+            guard let code = command.key.androidKeyCode else { return .result(dialog: "Diese Taste gibt es hier nicht.") }
+            try await ATVRemote.pressOnce(host: tv.endpoint.host, keyCode: code)
+            return .result(dialog: "Erledigt.")
         }
         if command == .power, let state = try? await tv.client.powerState(), state != "On" {
             try await tv.client.setPower(true)

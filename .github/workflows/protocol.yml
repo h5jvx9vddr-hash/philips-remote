@@ -1,28 +1,64 @@
-name: Protokolltest (simulierter TV)
+name: Protokolltests (Philips + Android TV)
 
 on:
   push:
     branches: [main]
-    paths: ['App/TV/PhilipsClient.swift', 'App/TV/Keys.swift', 'App/TV/Discovery.swift', 'Tests/**', '.github/workflows/protocol.yml']
+    paths: ['App/TV/**', 'Tests/**', '.github/workflows/protocol.yml']
   workflow_dispatch:
 
 jobs:
-  test:
+  # Echte TLS-Verbindung mit Schlüsselbund-Identität, Kopplung und Tasten gegen eine simulierte MagentaTV-Box
+  tls:
+    runs-on: macos-26
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v5
+      - name: Python + Referenz-Protos
+        run: |
+          python3 -m venv /tmp/venv
+          /tmp/venv/bin/pip install -q grpcio-tools protobuf cryptography
+          /tmp/venv/bin/python -m grpc_tools.protoc -I Tests/atv --python_out=Tests/atv Tests/atv/polo.proto Tests/atv/remotemessage.proto
+      - name: Server-Zertifikat + Mock starten
+        run: |
+          mkdir -p /tmp/atv
+          openssl req -x509 -newkey rsa:2048 -nodes -days 3650 -subj "/CN=MagentaTV" -keyout /tmp/atv/server.key -out /tmp/atv/server.pem
+          openssl x509 -in /tmp/atv/server.pem -outform der -out /tmp/atv/server.der
+          /tmp/venv/bin/python Tests/atv/atv_mock.py 16467 16466 /tmp/atv > /tmp/atv/mock.log 2>&1 &
+          sleep 1
+      - name: Test bauen + ausführen
+        working-directory: Tests/ATVCheck
+        run: |
+          cp ../../App/TV/ATVProtocol.swift ../../App/TV/ATVConnection.swift Sources/ATVCheck/
+          swift build -c release 2>&1 | tail -30
+          .build/release/ATVCheck 16467 16466 /tmp/atv
+      - name: Mock-Log
+        if: always()
+        run: cat /tmp/atv/mock.log || true
+
+  # Protobuf-Kodierung gegen die Referenz-Klassen + Zertifikat mit openssl prüfen
+  vectors:
     runs-on: ubuntu-24.04
     timeout-minutes: 20
     steps:
       - uses: actions/checkout@v5
-      - name: Swift
-        run: swift --version
+      - name: Python + Referenz-Protos
+        run: |
+          pip install -q grpcio-tools protobuf cryptography
+          python3 -m grpc_tools.protoc -I Tests/atv --python_out=Tests/atv Tests/atv/polo.proto Tests/atv/remotemessage.proto
+          python3 Tests/atv/vectors.py gen /tmp/vectors.json
       - name: Simulierte Philips-TVs starten
         run: |
           python3 Tests/mock_tv.py 19251 19252 &
           sleep 1
-          curl -sf http://127.0.0.1:19251/6/system | head -c 200; echo
-          curl -sf http://127.0.0.1:19252/1/system | head -c 200; echo
-      - name: Test bauen + ausführen
+      - name: Swift-Test
         working-directory: Tests/ProtocolCheck
         run: |
-          cp ../../App/TV/PhilipsClient.swift ../../App/TV/Keys.swift ../../App/TV/Discovery.swift Sources/ProtocolCheck/
+          cp ../../App/TV/PhilipsClient.swift ../../App/TV/Keys.swift ../../App/TV/Discovery.swift ../../App/TV/ATVProtocol.swift Sources/ProtocolCheck/
           swift build -c release 2>&1 | tail -30
-          .build/release/ProtocolCheck 19251 19252
+          .build/release/ProtocolCheck 19251 19252 /tmp/vectors.json /tmp/swift.json /tmp/cert.pem
+      - name: Swift-Nachrichten mit Referenz dekodieren
+        run: python3 Tests/atv/vectors.py verify /tmp/swift.json
+      - name: Zertifikat mit openssl prüfen
+        run: |
+          openssl x509 -in /tmp/cert.pem -noout -subject -dates -ext basicConstraints
+          openssl verify -CAfile /tmp/cert.pem /tmp/cert.pem

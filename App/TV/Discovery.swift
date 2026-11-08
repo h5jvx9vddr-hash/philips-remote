@@ -76,9 +76,9 @@ enum Discovery {
                 for start in stride(from: 0, to: all.count, by: 64) {
                     if Task.isCancelled { break }
                     let batch = Array(all[start ..< min(start + 64, all.count)])
-                    let open = await openHosts(batch, ports: [ports.http, ports.https])
+                    let open = await openPorts(batch, ports: [ports.http, ports.https, ports.atvRemote, ports.atvPairing])
                     await withTaskGroup(of: FoundTV?.self) { group in
-                        for host in open { group.addTask { await PhilipsClient.probe(host, ports: ports) } }
+                        for (host, p) in open { group.addTask { await identify(host, open: p, ports: ports) } }
                         for await tv in group { if let tv { cont.yield(tv) } }
                     }
                 }
@@ -86,6 +86,25 @@ enum Discovery {
             }
             cont.onTermination = { _ in task.cancel() }
         }
+    }
+
+    /// Philips (JointSPACE) hat Vorrang; sonst Android-/Google-TV-Gerät, falls dessen Fernbedienungsports offen sind.
+    static func identify(_ host: String, open: Set<Int>, ports: PhilipsPorts) async -> FoundTV? {
+        if !open.isDisjoint(with: [ports.http, ports.https]), let tv = await PhilipsClient.probe(host, ports: ports) {
+            return tv
+        }
+        guard !open.isDisjoint(with: [ports.atvRemote, ports.atvPairing]) else { return nil }
+        return FoundTV(endpoint: TVEndpoint(host: host, secure: true, api: 0, kind: .androidTV),
+                       info: TVInfo(name: await castName(host) ?? "Android-TV-Gerät", needsPairing: true, os: "Android TV"))
+    }
+
+    /// Gerätename aus der Chromecast-Schnittstelle (z. B. „MagentaTV One“), falls verfügbar.
+    static func castName(_ host: String) async -> String? {
+        guard let url = URL(string: "http://\(host):8008/setup/eureka_info?params=name") else { return nil }
+        guard let r = try? await PhilipsClient.probeSession.data(from: url),
+              let json = try? JSONSerialization.jsonObject(with: r.0) as? [String: Any],
+              let name = json["name"] as? String, !name.isEmpty else { return nil }
+        return name
     }
 
     /// Alle Treffer eines kompletten Suchlaufs.
@@ -181,8 +200,8 @@ enum Discovery {
         }
         let hosts = candidateHosts()
         lines.append("Geprüfte Adressen: \(hosts.count)")
-        // 1925/1926 JointSPACE, 8008/8009 Chromecast (Google TV), 8443 Android-TV-Fernbedienung, 7000/80 Titan OS & Co.
-        let ports = [1925, 1926, 8008, 8009, 8443, 9080, 80]
+        // 1925/1926 JointSPACE, 6466/6467 Android-TV-Fernbedienung, 8008/8009/8443 Chromecast, 80/9080 Sonstige
+        let ports = [1925, 1926, 6466, 6467, 8008, 8009, 8443, 9080, 80]
         var found: [String: Set<Int>] = [:]
         for start in stride(from: 0, to: hosts.count, by: 18) {
             let batch = Array(hosts[start ..< min(start + 18, hosts.count)])
@@ -194,6 +213,7 @@ enum Discovery {
             if !found[host]!.isDisjoint(with: [1925, 1926]) {
                 lines += await PhilipsClient.probeReport(host).map { "  " + $0 }
             }
+            if let name = await castName(host) { lines.append("  Chromecast-Name: \(name)") }
         }
         return lines.joined(separator: "\n")
     }

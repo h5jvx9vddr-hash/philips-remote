@@ -25,13 +25,15 @@ extension SavedTV {
     /// Den gespeicherten TV im aktuellen Netz wiederfinden (gleicher Name, sonst der einzige gefundene).
     /// Bei gekoppelten TVs zählt nur einer, der die Zugangsdaten annimmt.
     func locate() async -> SavedTV? {
-        let found = await Discovery.findAll()
+        let found = await Discovery.findAll().filter { $0.endpoint.isAndroidTV == endpoint.isAndroidTV }
         let ordered = found.filter { $0.info.name == info.name } + found.filter { $0.info.name != info.name }
         for (i, tv) in ordered.enumerated() {
             if tv.info.name != info.name && (found.count > 1 || i > 0) { continue }
             var moved = self
             moved.endpoint = tv.endpoint
-            if credentials != nil {
+            if moved.endpoint.isAndroidTV {
+                do { try await ATVRemote.pressOnce(host: moved.endpoint.host, keyCode: nil) } catch ATVError.notPaired { continue } catch {}
+            } else if credentials != nil {
                 do { _ = try await moved.client.volume() } catch PhilipsError.unauthorized { continue } catch {}
             }
             return moved
@@ -70,6 +72,8 @@ final class TVStore {
     private var toastTask: Task<Void, Never>?
     private var volumeTask: Task<Void, Never>?
     private var volumeSetAt = Date.distantPast
+    /// Steuerverbindung bei Android-/Google-TV-Geräten (bleibt offen, solange die App aktiv ist).
+    private var atv: ATVRemote?
 
     init() {
         let args = ProcessInfo.processInfo.arguments
@@ -90,6 +94,32 @@ final class TVStore {
     }
 
     private var client: PhilipsClient? { tv?.client }
+    var isAndroidTV: Bool { tv?.endpoint.isAndroidTV == true }
+
+    private func atvRemote() async throws -> ATVRemote {
+        guard let tv else { throw PhilipsError.notPaired }
+        if let atv, atv.isOpen, atv.host == tv.endpoint.host { return atv }
+        atv?.close()
+        let r = ATVRemote(host: tv.endpoint.host)
+        r.onVolume = { [weak self] level, max, muted in
+            Task { @MainActor in
+                guard let self else { return }
+                if Date.now.timeIntervalSince(self.volumeSetAt) > 1.5 {
+                    self.volume = Volume(current: level, min: 0, max: max, muted: muted)
+                }
+            }
+        }
+        r.onPower = { [weak self] on in Task { @MainActor in self?.power = on ? "On" : "Standby" } }
+        r.onClose = { [weak self, weak r] _ in Task { @MainActor in if let self, self.atv === r { self.atv = nil } } }
+        atv = r
+        do {
+            try await r.connect()
+        } catch {
+            if atv === r { atv = nil }
+            throw error
+        }
+        return r
+    }
 
     var statusText: String {
         if waking { return "wird eingeschaltet …" }
@@ -111,8 +141,20 @@ final class TVStore {
         tv = SavedTV(endpoint: found.endpoint, info: found.info, credentials: credentials, mac: keepMAC)
         online = true
         failures = 0
-        if let mac = try? await client?.mac() { tv?.mac = mac }
+        if !found.endpoint.isAndroidTV, let mac = try? await client?.mac() { tv?.mac = mac }
         await refresh()
+    }
+
+    func startATVPairing(_ found: FoundTV) async throws -> ATVPairing {
+        try await ATVPairing.start(host: found.endpoint.host, clientName: "Philips Remote (\(UIDevice.current.name))")
+    }
+
+    func finishATVPairing(_ found: FoundTV, pairing: ATVPairing, code: String) async throws {
+        try await pairing.finish(code: code)
+        unauthorized = false
+        atv?.close()
+        atv = nil
+        await adopt(found, credentials: nil)
     }
 
     func startPairing(_ found: FoundTV) async throws -> PairingSession {
@@ -128,13 +170,17 @@ final class TVStore {
     func probe(manualIP raw: String) async throws -> FoundTV {
         guard let host = PhilipsClient.normalize(raw) else { throw PhilipsError.invalidHost }
         UserDefaults.standard.set(host, forKey: "philips.lastIP")
-        guard let found = await PhilipsClient.probe(host) else {
-            throw PhilipsError.unreachable("keine Philips-Antwort auf Port 1925/1926")
+        let ports = PhilipsPorts.standard
+        let open = await Discovery.openPorts([host], ports: [ports.http, ports.https, ports.atvRemote, ports.atvPairing], timeout: 2)
+        guard let found = await Discovery.identify(host, open: open[host] ?? [], ports: ports) else {
+            throw PhilipsError.unreachable("weder Philips- (1925/1926) noch Android-TV-Ports (6466/6467) offen")
         }
         return found
     }
 
     func remove() {
+        atv?.close()
+        atv = nil
         if let host = tv?.endpoint.host { DigestAuth.forget(host) }
         tv = nil
         online = nil
@@ -152,7 +198,11 @@ final class TVStore {
 
     func press(_ key: PhilipsKey) {
         Haptics.tap()
-        guard !demo, tv != nil else { return }
+        guard !demo, let tv else { return }
+        if tv.endpoint.isAndroidTV {
+            pressAndroid(key)
+            return
+        }
         // Bei Dauerdruck auf einen langsamen/aus­geschalteten TV keinen Rückstau aufbauen.
         guard pending < 4 else { return }
         pending += 1
@@ -188,8 +238,54 @@ final class TVStore {
         }
     }
 
+    private func pressAndroid(_ key: PhilipsKey) {
+        guard let code = key.androidKeyCode else {
+            show("Diese Taste gibt es bei Android-TV-Geräten nicht.")
+            return
+        }
+        guard pending < 4 else { return }
+        pending += 1
+        let previous = queue
+        queue = Task {
+            await previous?.value
+            defer { pending -= 1 }
+            do {
+                try await atvRemote().press(code)
+                online = true
+                unauthorized = false
+            } catch ATVError.notPaired {
+                unauthorized = true
+                show(ATVError.notPaired.localizedDescription)
+            } catch {
+                online = false
+                if key == .standby, tv?.mac != nil {
+                    await wake()
+                    return
+                }
+                show("Gerät nicht erreichbar – ich suche es im Netz …")
+                await search(force: true)
+            }
+        }
+    }
+
     func setVolume(_ n: Int) {
         guard n != volume?.current else { return }
+        if isAndroidTV {
+            // Absolute Lautstärke kennt das Protokoll nicht → Lauter/Leiser in Schritten.
+            let diff = n - (volume?.current ?? n)
+            volume?.current = n
+            volumeSetAt = .now
+            volumeTask?.cancel()
+            volumeTask = Task {
+                try? await Task.sleep(for: .milliseconds(250))
+                guard !Task.isCancelled, let r = try? await atvRemote() else { return }
+                for _ in 0..<min(abs(diff), 40) {
+                    r.press(diff > 0 ? 24 : 25)
+                    try? await Task.sleep(for: .milliseconds(60))
+                }
+            }
+            return
+        }
         volume?.current = n
         volumeSetAt = .now
         guard !demo, let client else { return }
@@ -207,7 +303,7 @@ final class TVStore {
         if demo { return }
         waking = true
         defer { waking = false }
-        if (try? await tv.client.setPower(true)) != nil {
+        if !tv.endpoint.isAndroidTV, (try? await tv.client.setPower(true)) != nil {
             power = "On"
             online = true
             return
@@ -219,7 +315,12 @@ final class TVStore {
         for _ in 0..<3 { await WakeOnLAN.send(mac: mac, host: tv.endpoint.host) }
         for _ in 0..<10 {
             try? await Task.sleep(for: .seconds(2))
-            if (try? await tv.client.info()) != nil {
+            if tv.endpoint.isAndroidTV, (try? await atvRemote()) != nil {
+                online = true
+                show("Gerät ist erreichbar.")
+                return
+            }
+            if !tv.endpoint.isAndroidTV, (try? await tv.client.info()) != nil {
                 try? await tv.client.setPower(true)
                 online = true
                 show("Fernseher ist an.")
@@ -245,6 +346,10 @@ final class TVStore {
             return false
         }
         self.tv?.endpoint = moved.endpoint
+        if atv?.host != moved.endpoint.host {
+            atv?.close()
+            atv = nil
+        }
         failures = 0
         online = true
         if moved.endpoint.host != tv.endpoint.host { show("Fernseher gefunden unter \(moved.endpoint.host).") }
@@ -269,10 +374,28 @@ final class TVStore {
     func stopPolling() {
         pollTask?.cancel()
         pollTask = nil
+        atv?.close()
+        atv = nil
     }
 
     func refresh() async {
         guard !demo, let client else { return }
+        if isAndroidTV {
+            do {
+                _ = try await atvRemote()
+                online = true
+                failures = 0
+                unauthorized = false
+            } catch ATVError.notPaired {
+                online = true
+                if !unauthorized { show(ATVError.notPaired.localizedDescription) }
+                unauthorized = true
+            } catch {
+                online = false
+                failures += 1
+            }
+            return
+        }
         do {
             let v = try await client.volume()
             // Gerade per Regler gesetzt → nicht vom alten Wert überschreiben lassen.
@@ -305,7 +428,7 @@ final class TVStore {
     }
 
     private func refreshVolume() async {
-        guard let client else { return }
+        guard !isAndroidTV, let client else { return }
         if let v = try? await client.volume() { volume = v }
     }
 
