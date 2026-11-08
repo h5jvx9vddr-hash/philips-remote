@@ -104,7 +104,8 @@ check(tv1.endpoint.api == 1 && !tv1.info.needsPairing && tv1.info.name == "Phili
 let old = PhilipsClient(endpoint: tv1.endpoint, ports: v1Ports)
 try await old.send(PhilipsKey.mute.rawValue)
 try await old.setVolume(5)
-check(try keyLog(v1Port) == ["Mute"] && (try await old.volume()).current == 5, "v1: Taste + Lautstärke")
+let oldVolume = try await old.volume().current
+check(try keyLog(v1Port) == ["Mute"] && oldVolume == 5, "v1: Taste + Lautstärke")
 
 // Nicht erreichbar
 let start = Date()
