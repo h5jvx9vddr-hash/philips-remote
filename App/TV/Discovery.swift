@@ -122,6 +122,15 @@ enum Discovery {
 
     /// Host → offene Ports (nur Hosts mit mindestens einem offenen Port).
     static func openPorts(_ hosts: [String], ports: [Int], timeout: Double = 1.2) async -> [String: Set<Int>] {
+        let results = await portResults(hosts, ports: ports, timeout: timeout)
+        return results.compactMapValues { r in
+            let open = Set(r.filter { $0.value == 0 }.keys)
+            return open.isEmpty ? nil : open
+        }
+    }
+
+    /// Host → Port → errno (0 = offen, ECONNREFUSED = Gerät da, Port zu, ETIMEDOUT = keine Antwort).
+    static func portResults(_ hosts: [String], ports: [Int], timeout: Double = 1.2) async -> [String: [Int: Int32]] {
         await withCheckedContinuation { cont in
             DispatchQueue.global(qos: .userInitiated).async {
                 cont.resume(returning: probePorts(hosts, ports: ports, timeout: timeout))
@@ -130,10 +139,10 @@ enum Discovery {
     }
 
     /// Nicht blockierende connect()-Aufrufe für alle Ziele, dann gemeinsam per poll() warten.
-    private static func probePorts(_ hosts: [String], ports: [Int], timeout: Double) -> [String: Set<Int>] {
+    private static func probePorts(_ hosts: [String], ports: [Int], timeout: Double) -> [String: [Int: Int32]] {
         var sockets: [(fd: Int32, host: String, port: Int)] = []
         defer { for s in sockets { close(s.fd) } }
-        var open: [String: Set<Int>] = [:]
+        var result: [String: [Int: Int32]] = [:]
 
         for host in hosts {
             var addr = sockaddr_in()
@@ -157,12 +166,14 @@ enum Discovery {
                         connect(fd, $0, socklen_t(MemoryLayout<sockaddr_in>.size))
                     }
                 }
+                let err = errno
                 if r == 0 {
-                    open[host, default: []].insert(port)
+                    result[host, default: [:]][port] = 0
                     close(fd)
-                } else if errno == EINPROGRESS {
+                } else if err == EINPROGRESS {
                     sockets.append((fd, host, port))
                 } else {
+                    result[host, default: [:]][port] = err
                     close(fd)
                 }
             }
@@ -182,12 +193,13 @@ enum Discovery {
                 var err: Int32 = 0
                 var len = socklen_t(MemoryLayout<Int32>.size)
                 getsockopt(p.fd, SOL_SOCKET, SO_ERROR, &err, &len)
-                if err == 0, let t = target[p.fd] { open[t.0, default: []].insert(t.1) }
+                if let t = target[p.fd] { result[t.0, default: [:]][t.1] = err }
                 target[p.fd] = nil
             }
             pending = still
         }
-        return open
+        for (_, t) in target { result[t.0, default: [:]][t.1] = ETIMEDOUT }
+        return result
     }
 
     /// Was sieht die Suche? Für die Diagnose-Ansicht: Netze, alle Geräte mit TV-typischen Ports, Antwort auf `system`.
@@ -202,12 +214,26 @@ enum Discovery {
         lines.append("Geprüfte Adressen: \(hosts.count)")
         // 1925/1926 JointSPACE, 6466/6467 Android-TV-Fernbedienung, 8008/8009/8443 Chromecast, 80/9080 Sonstige
         let ports = [1925, 1926, 6466, 6467, 8008, 8009, 8443, 9080, 80]
-        var found: [String: Set<Int>] = [:]
+        var results: [String: [Int: Int32]] = [:]
         for start in stride(from: 0, to: hosts.count, by: 18) {
             let batch = Array(hosts[start ..< min(start + 18, hosts.count)])
-            found.merge(await openPorts(batch, ports: ports, timeout: 1.5)) { $0.union($1) }
+            results.merge(await portResults(batch, ports: ports, timeout: 2.5)) { $0.merging($1) { $1 } }
         }
-        if found.isEmpty { lines.append("Kein Gerät antwortet. iOS-Einstellungen → Datenschutz → Lokales Netzwerk → Philips TV an?") }
+        let found = results.compactMapValues { r -> Set<Int>? in
+            let open = Set(r.filter { $0.value == 0 }.keys)
+            return open.isEmpty ? nil : open
+        }
+        // Wer mit „abgelehnt“ antwortet, ist da (nur Ports zu); andere Fehler zeigen, ob iOS blockiert.
+        let present = hosts.filter { h in found[h] == nil && results[h]?.values.contains(ECONNREFUSED) == true }
+        if !present.isEmpty { lines.append("Erreichbar, aber TV-Ports zu: \(present.joined(separator: ", "))") }
+        var errors: [String: Int] = [:]
+        for h in hosts where found[h] == nil && !present.contains(h) {
+            for e in Set(results[h]?.values.map { $0 } ?? []) {
+                errors[e == ETIMEDOUT ? "keine Antwort" : "\(String(cString: strerror(e))) (\(e))", default: 0] += 1
+            }
+        }
+        for (e, n) in errors.sorted(by: { $0.value > $1.value }) { lines.append("  \(n) Adressen: \(e)") }
+        if found.isEmpty { lines.append("Kein Gerät mit TV-Ports. iOS-Einstellungen → Datenschutz → Lokales Netzwerk → Philips TV an?") }
         for host in hosts where found[host] != nil {
             lines.append("\(host): Ports \(found[host]!.sorted().map(String.init).joined(separator: ", "))")
             if !found[host]!.isDisjoint(with: [1925, 1926]) {
