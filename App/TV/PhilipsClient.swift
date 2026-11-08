@@ -140,6 +140,24 @@ struct PhilipsClient {
         return nil
     }
 
+    /// Für die Diagnose: Antwort bzw. Fehler je Versuch.
+    static func probeReport(_ host: String) async -> [String] {
+        var out: [String] = []
+        for (secure, api) in [(true, 6), (false, 6), (false, 5), (false, 1)] {
+            let c = PhilipsClient(endpoint: TVEndpoint(host: host, secure: secure, api: api))
+            let label = "\(secure ? "https:1926" : "http:1925")/\(api)/system"
+            do {
+                let data = try await c.request("system", method: "GET", json: nil, session: probeSession)
+                out.append("\(label): OK \(String(decoding: data.prefix(160), as: UTF8.self))")
+            } catch let e as PhilipsError {
+                out.append("\(label): \(e.errorDescription ?? "\(e)")")
+            } catch {
+                out.append("\(label): \(error.localizedDescription)")
+            }
+        }
+        return out
+    }
+
     // MARK: Koppeln
 
     func pairRequest(deviceName: String) async throws -> PairingSession {
@@ -311,7 +329,9 @@ struct PhilipsClient {
         case .cannotConnectToHost: "Verbindung abgelehnt"
         case .notConnectedToInternet: "kein Netz – „Lokales Netzwerk“ für die App erlaubt?"
         case .networkConnectionLost: "Verbindung abgebrochen"
-        default: e.localizedDescription
+        case .secureConnectionFailed, .serverCertificateUntrusted, .serverCertificateHasBadDate:
+            "TLS-Fehler \(e.code.rawValue)"
+        default: "\(e.localizedDescription) [\(e.code.rawValue)]"
         }
     }
 }

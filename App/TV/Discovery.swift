@@ -97,6 +97,12 @@ enum Discovery {
 
     /// Hosts, bei denen mindestens einer der Ports eine TCP-Verbindung annimmt.
     static func openHosts(_ hosts: [String], ports: [Int], timeout: Double = 1.2) async -> [String] {
+        let open = await openPorts(hosts, ports: ports, timeout: timeout)
+        return hosts.filter { open[$0] != nil }
+    }
+
+    /// Host → offene Ports (nur Hosts mit mindestens einem offenen Port).
+    static func openPorts(_ hosts: [String], ports: [Int], timeout: Double = 1.2) async -> [String: Set<Int>] {
         await withCheckedContinuation { cont in
             DispatchQueue.global(qos: .userInitiated).async {
                 cont.resume(returning: probePorts(hosts, ports: ports, timeout: timeout))
@@ -105,10 +111,10 @@ enum Discovery {
     }
 
     /// Nicht blockierende connect()-Aufrufe für alle Ziele, dann gemeinsam per poll() warten.
-    private static func probePorts(_ hosts: [String], ports: [Int], timeout: Double) -> [String] {
-        var sockets: [(fd: Int32, host: String)] = []
+    private static func probePorts(_ hosts: [String], ports: [Int], timeout: Double) -> [String: Set<Int>] {
+        var sockets: [(fd: Int32, host: String, port: Int)] = []
         defer { for s in sockets { close(s.fd) } }
-        var open = Set<String>()
+        var open: [String: Set<Int>] = [:]
 
         for host in hosts {
             var addr = sockaddr_in()
@@ -133,10 +139,10 @@ enum Discovery {
                     }
                 }
                 if r == 0 {
-                    open.insert(host)
+                    open[host, default: []].insert(port)
                     close(fd)
                 } else if errno == EINPROGRESS {
-                    sockets.append((fd, host))
+                    sockets.append((fd, host, port))
                 } else {
                     close(fd)
                 }
@@ -145,7 +151,7 @@ enum Discovery {
 
         let deadline = Date().addingTimeInterval(timeout)
         var pending = sockets.map { pollfd(fd: $0.fd, events: Int16(POLLOUT), revents: 0) }
-        var hostOf = Dictionary(uniqueKeysWithValues: sockets.map { ($0.fd, $0.host) })
+        var target = Dictionary(uniqueKeysWithValues: sockets.map { ($0.fd, ($0.host, $0.port)) })
         while !pending.isEmpty {
             let left = deadline.timeIntervalSinceNow
             guard left > 0 else { break }
@@ -157,11 +163,38 @@ enum Discovery {
                 var err: Int32 = 0
                 var len = socklen_t(MemoryLayout<Int32>.size)
                 getsockopt(p.fd, SOL_SOCKET, SO_ERROR, &err, &len)
-                if err == 0, let h = hostOf[p.fd] { open.insert(h) }
-                hostOf[p.fd] = nil
+                if err == 0, let t = target[p.fd] { open[t.0, default: []].insert(t.1) }
+                target[p.fd] = nil
             }
             pending = still
         }
-        return hosts.filter(open.contains)
+        return open
+    }
+
+    /// Was sieht die Suche? Für die Diagnose-Ansicht: Netze, alle Geräte mit TV-typischen Ports, Antwort auf `system`.
+    static func diagnose() async -> String {
+        var lines: [String] = []
+        let ifs = interfaces()
+        lines.append(ifs.isEmpty ? "Keine Netze gefunden (WLAN aus? Hotspot ohne verbundene Geräte?)" : "Netze:")
+        for i in ifs {
+            lines.append("  \(i.name): \(dotted(i.address)) / \(dotted(i.netmask))\(i.isHotspot ? " (Hotspot)" : "")")
+        }
+        let hosts = candidateHosts()
+        lines.append("Geprüfte Adressen: \(hosts.count)")
+        // 1925/1926 JointSPACE, 8008/8009 Chromecast (Google TV), 8443 Android-TV-Fernbedienung, 7000/80 Titan OS & Co.
+        let ports = [1925, 1926, 8008, 8009, 8443, 9080, 80]
+        var found: [String: Set<Int>] = [:]
+        for start in stride(from: 0, to: hosts.count, by: 18) {
+            let batch = Array(hosts[start ..< min(start + 18, hosts.count)])
+            found.merge(await openPorts(batch, ports: ports, timeout: 1.5)) { $0.union($1) }
+        }
+        if found.isEmpty { lines.append("Kein Gerät antwortet. iOS-Einstellungen → Datenschutz → Lokales Netzwerk → Philips TV an?") }
+        for host in hosts where found[host] != nil {
+            lines.append("\(host): Ports \(found[host]!.sorted().map(String.init).joined(separator: ", "))")
+            if !found[host]!.isDisjoint(with: [1925, 1926]) {
+                lines += await PhilipsClient.probeReport(host).map { "  " + $0 }
+            }
+        }
+        return lines.joined(separator: "\n")
     }
 }

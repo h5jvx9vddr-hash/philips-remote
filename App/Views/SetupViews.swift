@@ -177,6 +177,8 @@ struct SetupView: View {
                 Section("Vorher am Fernseher") {
                     HelpSteps()
                 }
+
+                DiagnoseSection()
             }
             .navigationTitle("Philips TV")
             .sheet(item: $flow.pinFor) { _ in
@@ -324,6 +326,8 @@ struct SettingsView: View {
                 Section("Hilfe") {
                     HelpSteps()
                 }
+
+                DiagnoseSection()
             }
             .navigationTitle("Einstellungen")
             .onAppear { mac = store.tv?.mac ?? "" }
@@ -334,6 +338,42 @@ struct SettingsView: View {
             .confirmationDialog("Fernseher entfernen?", isPresented: $confirmRemove, titleVisibility: .visible) {
                 Button("Entfernen", role: .destructive) { store.remove() }
             }
+        }
+    }
+}
+
+/// Zeigt, was die Suche im Netz sieht – zum Weitergeben, wenn kein TV gefunden wird.
+struct DiagnoseSection: View {
+    @State private var report: String?
+    @State private var running = false
+
+    var body: some View {
+        Section {
+            Button {
+                Task {
+                    running = true
+                    report = await Discovery.diagnose()
+                    running = false
+                }
+            } label: {
+                HStack {
+                    Text("Netz-Diagnose starten")
+                    Spacer()
+                    if running { ProgressView() }
+                }
+            }
+            .disabled(running)
+            if let report {
+                Text(report)
+                    .font(.caption.monospaced())
+                    .textSelection(.enabled)
+                ShareLink("Ergebnis teilen", item: report)
+                Button("Kopieren") { UIPasteboard.general.string = report }
+            }
+        } header: {
+            Text("Diagnose")
+        } footer: {
+            Text("Dauert bis zu 30 Sekunden. Das Ergebnis zeigt alle Geräte im Netz mit TV-typischen Ports.")
         }
     }
 }
