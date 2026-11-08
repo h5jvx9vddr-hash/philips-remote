@@ -1,0 +1,7 @@
+build/
+*.xcodeproj
+*.ipa
+Tests/ProtocolCheck/.build/
+Tests/ProtocolCheck/Sources/ProtocolCheck/PhilipsClient.swift
+Tests/ProtocolCheck/Sources/ProtocolCheck/Keys.swift
+Tests/ProtocolCheck/Sources/ProtocolCheck/Discovery.swift

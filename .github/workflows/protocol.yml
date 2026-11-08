@@ -1,0 +1,28 @@
+name: Protokolltest (simulierter TV)
+
+on:
+  push:
+    branches: [main]
+    paths: ['App/TV/PhilipsClient.swift', 'App/TV/Keys.swift', 'App/TV/Discovery.swift', 'Tests/**', '.github/workflows/protocol.yml']
+  workflow_dispatch:
+
+jobs:
+  test:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v5
+      - name: Swift
+        run: swift --version
+      - name: Simulierte Philips-TVs starten
+        run: |
+          python3 Tests/mock_tv.py 19251 19252 &
+          sleep 1
+          curl -sf http://127.0.0.1:19251/6/system | head -c 200; echo
+          curl -sf http://127.0.0.1:19252/1/system | head -c 200; echo
+      - name: Test bauen + ausführen
+        working-directory: Tests/ProtocolCheck
+        run: |
+          cp ../../App/TV/PhilipsClient.swift ../../App/TV/Keys.swift ../../App/TV/Discovery.swift Sources/ProtocolCheck/
+          swift build -c release 2>&1 | tail -30
+          .build/release/ProtocolCheck 19251 19252

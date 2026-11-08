@@ -1,0 +1,13 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1024 1024">
+  <rect width="1024" height="1024" fill="#000"/>
+  <!-- Fernseher -->
+  <rect x="150" y="230" width="724" height="430" rx="44" fill="none" stroke="#fff" stroke-width="40"/>
+  <path d="M392 760 H632" stroke="#fff" stroke-width="40" stroke-linecap="round"/>
+  <path d="M512 680 V760" stroke="#fff" stroke-width="40"/>
+  <!-- Suchwellen -->
+  <g fill="none" stroke="#fff" stroke-width="36" stroke-linecap="round">
+    <path d="M412 470 A140 140 0 0 1 612 470"/>
+    <path d="M342 400 A240 240 0 0 1 682 400"/>
+  </g>
+  <circle cx="512" cy="550" r="40" fill="#fff"/>
+</svg>

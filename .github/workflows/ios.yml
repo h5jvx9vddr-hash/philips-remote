@@ -1,0 +1,51 @@
+name: iOS IPA
+
+on:
+  push:
+    branches: [main]
+    paths: ['App/**', 'project.yml', '.github/workflows/ios.yml']
+  workflow_dispatch:
+
+jobs:
+  build:
+    runs-on: macos-26
+    timeout-minutes: 40
+    steps:
+      - uses: actions/checkout@v5
+
+      - name: Xcode
+        run: xcodebuild -version
+
+      - name: XcodeGen
+        run: |
+          brew install xcodegen
+          xcodegen generate
+
+      - name: Build (unsigniert)
+        run: |
+          if ! xcodebuild -project PhilipsRemote.xcodeproj -scheme PhilipsRemote -configuration Release \
+              -sdk iphoneos -destination 'generic/platform=iOS' -derivedDataPath build \
+              -skipPackagePluginValidation -skipMacroValidation \
+              CODE_SIGNING_ALLOWED=NO CODE_SIGNING_REQUIRED=NO CODE_SIGN_IDENTITY="" \
+              build > build.log 2>&1; then
+            echo "::group::Fehler"
+            grep -E "error:" -A3 build.log | head -200
+            echo "::endgroup::"
+            tail -30 build.log
+            exit 1
+          fi
+          grep -E "warning:" build.log | grep -v "/SourcePackages/" | sort -u | head -40 || true
+          test -x build/Build/Products/Release-iphoneos/PhilipsRemote.app/PhilipsRemote
+
+      - name: IPA packen
+        run: |
+          mkdir -p Payload
+          cp -R build/Build/Products/Release-iphoneos/PhilipsRemote.app Payload/
+          zip -qry PhilipsRemote.ipa Payload
+          ls -la PhilipsRemote.ipa
+
+      - uses: actions/upload-artifact@v5
+        with:
+          name: PhilipsRemote-ipa
+          path: PhilipsRemote.ipa
+          retention-days: 30

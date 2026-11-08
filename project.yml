@@ -1,0 +1,40 @@
+name: PhilipsRemote
+options:
+  bundleIdPrefix: com.selfhosted
+  deploymentTarget:
+    iOS: "26.0"
+  createIntermediateGroups: true
+settings:
+  base:
+    SWIFT_VERSION: "5.0"
+    MARKETING_VERSION: "1.0"
+    CURRENT_PROJECT_VERSION: "1"
+    TARGETED_DEVICE_FAMILY: "1"
+    IPHONEOS_DEPLOYMENT_TARGET: "26.0"
+    GENERATE_INFOPLIST_FILE: NO
+targets:
+  PhilipsRemote:
+    type: application
+    platform: iOS
+    sources:
+      - path: App
+    info:
+      path: App/Info.plist
+      properties:
+        CFBundleDisplayName: Philips TV
+        CFBundleDevelopmentRegion: de
+        CFBundleLocalizations: [de]
+        CFBundleShortVersionString: $(MARKETING_VERSION)
+        CFBundleVersion: $(CURRENT_PROJECT_VERSION)
+        UILaunchScreen: {}
+        UISupportedInterfaceOrientations: [UIInterfaceOrientationPortrait]
+        UIRequiresFullScreen: true
+        ITSAppUsesNonExemptEncryption: false
+        NSLocalNetworkUsageDescription: "Wird benötigt, um deinen Philips-Fernseher im WLAN oder Hotspot zu finden und zu steuern."
+        NSAppTransportSecurity:
+          NSAllowsArbitraryLoads: true
+          NSAllowsLocalNetworking: true
+    settings:
+      base:
+        PRODUCT_BUNDLE_IDENTIFIER: com.selfhosted.philipsremote
+        ASSETCATALOG_COMPILER_APPICON_NAME: AppIcon

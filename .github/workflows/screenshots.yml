@@ -1,0 +1,61 @@
+name: Screenshots (Simulator)
+
+on:
+  workflow_dispatch:
+
+jobs:
+  shots:
+    runs-on: macos-26
+    timeout-minutes: 40
+    steps:
+      - uses: actions/checkout@v5
+
+      - name: XcodeGen
+        run: |
+          brew install xcodegen
+          xcodegen generate
+
+      - name: Build für Simulator
+        run: |
+          xcodebuild -project PhilipsRemote.xcodeproj -scheme PhilipsRemote -configuration Debug \
+            -sdk iphonesimulator -destination 'generic/platform=iOS Simulator' -derivedDataPath build \
+            build > build.log 2>&1 || { grep -E "error:" -A3 build.log | head -80; exit 1; }
+
+      - name: Screenshots
+        run: |
+          shoot() { # $1 Gerätename-Filter, $2 Präfix
+            UDID=$(xcrun simctl list devices available -j | python3 -c "
+          import json,sys
+          d=json.load(sys.stdin)['devices']
+          c=[(r,x) for r,l in d.items() if 'iOS' in r for x in l if x['name'].startswith('$1')]
+          print(sorted(c, key=lambda t: t[0])[-1][1]['udid'])")
+            xcrun simctl boot $UDID; xcrun simctl bootstatus $UDID -b
+            xcrun simctl spawn $UDID defaults write -g AppleLanguages -array de
+            xcrun simctl spawn $UDID defaults write -g AppleLocale -string de_DE
+            xcrun simctl shutdown $UDID; xcrun simctl boot $UDID; xcrun simctl bootstatus $UDID -b
+            xcrun simctl install $UDID build/Build/Products/Debug-iphonesimulator/PhilipsRemote.app
+            for mode in dark light; do
+              xcrun simctl ui $UDID appearance $mode
+              for tab in remote digits media settings; do
+                xcrun simctl terminate $UDID com.selfhosted.philipsremote 2>/dev/null || true
+                xcrun simctl launch $UDID com.selfhosted.philipsremote -demo 1 -tab $tab
+                sleep 5
+                xcrun simctl io $UDID screenshot shots/$2-$mode-$tab.png
+              done
+            done
+            xcrun simctl terminate $UDID com.selfhosted.philipsremote 2>/dev/null || true
+            xcrun simctl launch $UDID com.selfhosted.philipsremote -demo 1 -setup 1
+            sleep 5
+            xcrun simctl io $UDID screenshot shots/$2-setup.png
+            xcrun simctl shutdown $UDID
+          }
+          mkdir -p shots
+          shoot "iPhone 17 Pro" pro
+          shoot "iPhone 16e" klein || shoot "iPhone SE" klein || true
+          ls -la shots
+
+      - uses: actions/upload-artifact@v5
+        with:
+          name: screenshots
+          path: shots
+          retention-days: 7
